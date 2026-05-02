@@ -79,24 +79,35 @@ Print FilaFlex Foamy at 245°C throughout (full foaming). The geometry handles t
 5. **Print stats to console** every run: dimensions, solid volume (cm³), TPU mass at 1.21 g/cm³, face count, and voxel grid size. These numbers tell you whether the parameters make physical sense before you slice.
 6. **Always write the seed parameters into the output filename** so there's no ambiguity about which file came from what settings: `armrest_h15_L4-9_t065-022_grad2.3mf`.
 
+## Slicer-printable envelope (read this before tuning parameters)
+
+Sheet-gyroid wall thickness in real space is `w = t · L / π`. **The 0.6 mm hardened steel nozzle has an empirical floor at `w ≈ 1.0 mm`** — below that, the gyroid's per-layer cross-section fragments into thousands of disconnected polygons (the slicer can't connect adjacent wall sections), producing a print that's all travel and no extrusion. **Always design for `w ≥ 1.2 mm`** (safety margin above the floor).
+
+Verified empirically 2026-05-03 via polygon-count analysis (see [docs/2026-05-03-slicer-fragmentation-analysis.md](docs/2026-05-03-slicer-fragmentation-analysis.md)):
+- Walls 0.78–0.89 mm → 2000+ polygons per layer → unprintable
+- Walls 1.20–1.35 mm → < 150 polygons per layer → ok
+- Walls ≥ 1.4 mm → < 60 polygons per layer → optimal
+
+Both `t_bottom · L_bottom / π` and `t_top · L_top / π` must clear ~1.2 mm. This bounds `t` from below: `t_min = 1.2 · π / L`. For sparse top zones, lean toward larger `L_top` so `t_top` can drop without breaking the wall floor.
+
 ## Parameter reference (the design space)
 
-These are the knobs that matter for furniture comfort. Ranges are practical ranges for the P2S + 0.6 mm nozzle + soft TPU. Outside these ranges the print fails or the part feels wrong.
+Ranges below are **printable** ranges for the P2S + 0.6 mm hardened steel nozzle + soft TPU. The pre-2026-05-03 version of this table listed `t_top` minimum 0.15 mm — that produced ~0.4 mm walls and was NOT printable. Don't go below the values here.
 
-| Parameter | Default | Practical range | What it does | When to change it |
+| Parameter | Default | Printable range | What it does | When to change it |
 |---|---|---|---|---|
 | `width` | 100 mm | 80–150 mm | Long axis of footprint | Match the actual armrest length you're prototyping |
 | `depth` | 90 mm | 60–110 mm | Short axis of footprint | Match the actual armrest width |
-| `height` | 15 mm | 8–30 mm | Total z-height including base | Thicker = more comfort range. Below 10 mm the gradient has no room to express itself. |
+| `height` | 15 mm | 8–30 mm | Total z-height including base | Thicker = more comfort range. Below 10 mm the gradient has little room to express itself. |
 | `corner_radius` | 8 mm | 3–15 mm | Footprint corner softening | Bigger = softer industrial silhouette; smaller = crisper edges |
 | `base_thickness` | 1.0 mm | 0.6–2.0 mm | Solid bottom layer | Bigger = stronger mounting surface; smaller = saves material and print time |
-| `voxel` | 0.5 mm | 0.3–0.8 mm | Voxelisation resolution | Smaller = smoother surface but exponentially slower + more RAM. 0.5 is the sweet spot. |
-| `L_bottom` | 4.0 mm | 3.0–8.0 mm | Cell size at z=0 | Smaller = denser support, higher load capacity. Below 3 mm the 0.6 nozzle can't form clean walls. |
-| `L_top` | 9.0 mm | 6.0–18.0 mm | Cell size at z=H | Bigger = sparser, more compliant, more breathable. Above 18 mm cells become visually obvious. |
-| `t_bottom` | 0.65 mm | 0.45–0.85 mm | TPMS offset at z=0 | Bigger = thicker walls = firmer base. Below 0.45 the base feels weak under sit weight. |
-| `t_top` | 0.22 mm | 0.15–0.35 mm | TPMS offset at z=H | Smaller = thinner walls = softer touch. Below 0.15 mm walls don't print reliably on 0.6 nozzle. |
-| `gradient_power` | 2.0 | 0.5–4.0 | Curve of the firm→soft transition along z | 1.0 = linear; 2.0 = "firm base + comfort top" (default); 3.0 = "very firm base + mostly soft"; 0.5 = inverted (soft base, firm top — weird, almost never useful) |
-| `target_faces` | 200_000 | 50k–800k | Mesh decimation target | Lower = faster slice but visible faceting. 200k is good for 100×90 parts. |
+| `voxel` | 0.5 mm | 0.4–0.7 mm | Voxelisation resolution | Smaller = smoother surface but exponentially slower + more RAM. 0.5 is the sweet spot for our wall sizes. |
+| `L_bottom` | 6.0 mm | 5.0–10.0 mm | Cell size at z=0 | Smaller = denser support spatial frequency. Below 5 mm the wall floor forces saturated `t` (fully solid gyroid) which removes the lattice character. |
+| `L_top` | 10.0 mm | 8.0–14.0 mm | Cell size at z=H | Bigger = sparser, more compliant, more breathable. Larger `L_top` lets `t_top` drop further while keeping walls printable. Above 14 mm cells become visually obvious as a coarse pattern. |
+| `t_bottom` | 0.65 | **respect `t · L_bottom / π ≥ 1.2`** | TPMS offset at z=0 | Bigger = thicker walls = firmer base AND more material density. Practical: 0.50–0.85. |
+| `t_top` | 0.45 | **respect `t · L_top / π ≥ 1.2`** | TPMS offset at z=H | Smaller = thinner walls AND lower material density. Practical: 0.30–0.55. **Don't go below 0.30 even with `L_top=14`** — that's at the printable floor. |
+| `gradient_power` | 1.5 | 0.5–4.0 | Curve of the firm→soft transition along z | 1.0 = linear; 1.5 = mild firm-base bias (default); 2.0 = "firm base + comfort top"; 3.0 = "very firm base + mostly soft"; 0.5 = inverted |
+| `target_faces` | 50_000 | 30k–200k | Mesh decimation target | The script uses fast_simplification's "lossless floor" — at low aggression it refuses to break manifold-ness, hitting a natural floor well above the target. So target_faces is mostly nominal. |
 
 ### How to tune for feel
 

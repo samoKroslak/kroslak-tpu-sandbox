@@ -59,16 +59,20 @@ class ArmrestParams:
     corner_radius:  float = 8.0    # rounded-rectangle corner softening
     base_thickness: float = 1.0    # solid bottom layer (adhesion + mounting)
 
-    # Lattice — see CLAUDE.md "Parameter reference" for tuning guidance
-    L_bottom:        float = 4.0   # cell size at z=0 (smaller = denser)
-    L_top:           float = 9.0   # cell size at z=H (bigger = sparser)
-    t_bottom:        float = 0.65  # TPMS wall offset at z=0 (bigger = firmer)
-    t_top:           float = 0.22  # TPMS wall offset at z=H (smaller = softer)
-    gradient_power:  float = 2.0   # 1=linear, 2=firm-base+soft-top, 3=very-firm-base
+    # Lattice — see CLAUDE.md "Parameter reference" + "Slicer-printable
+    # envelope" for tuning guidance. Wall thickness w = t · L / π must be
+    # ≥ 1.2 mm everywhere or the slicer fragments the gyroid into thousands
+    # of disconnected polygons per layer (verified 2026-05-03).
+    L_bottom:        float = 6.0   # cell size at z=0 (smaller = denser support)
+    L_top:           float = 10.0  # cell size at z=H (bigger = sparser, softer)
+    t_bottom:        float = 0.65  # TPMS wall offset at z=0 (wall = 1.24 mm)
+    t_top:           float = 0.45  # TPMS wall offset at z=H (wall = 1.43 mm)
+    gradient_power:  float = 1.5   # 1=linear, 1.5=mild firm-base, 2=firmer base, 3=very firm
 
     # Mesh quality
     voxel:           float = 0.5     # voxelisation resolution (mm)
-    target_faces:    int   = 200_000 # decimation target
+    target_faces:    int   = 50_000  # decimation target — script hits the
+                                     # lossless floor well above this anyway
 
     # Surface test — solid top cap covering a sub-region of the footprint.
     # Set skin_thickness > 0 to enable. skin_x_min/max are in part-frame mm
@@ -302,14 +306,14 @@ def parse_cli() -> tuple[ArmrestParams, argparse.Namespace]:
     ap.add_argument("--height",         type=float, default=15.0)
     ap.add_argument("--corner-radius",  type=float, default=8.0)
     ap.add_argument("--base-thickness", type=float, default=1.0)
-    ap.add_argument("--L-bottom",       type=float, default=4.0)
-    ap.add_argument("--L-top",          type=float, default=9.0)
+    ap.add_argument("--L-bottom",       type=float, default=6.0)
+    ap.add_argument("--L-top",          type=float, default=10.0)
     ap.add_argument("--t-bottom",       type=float, default=0.65)
-    ap.add_argument("--t-top",          type=float, default=0.22)
-    ap.add_argument("--gradient",       type=float, default=2.0,
-                    help="Gradient curve power (1=linear, 2=firm-base+soft-top)")
+    ap.add_argument("--t-top",          type=float, default=0.45)
+    ap.add_argument("--gradient",       type=float, default=1.5,
+                    help="Gradient curve power (1=linear, 1.5=mild firm-base, 2=firm-base+soft-top)")
     ap.add_argument("--voxel",          type=float, default=0.5)
-    ap.add_argument("--target-faces",   type=int,   default=200_000)
+    ap.add_argument("--target-faces",   type=int,   default=50_000)
     ap.add_argument("--name",           type=str,   default="armrest")
     ap.add_argument("--out-dir",        type=Path,  default=Path("./out"))
     ap.add_argument("--density",        type=float, default=1.21,
@@ -395,16 +399,16 @@ def thin_skin_matrix_plate(base: ArmrestParams) -> None:
     skin_x_max = base.width / 2.0
     skin_thickness = 0.6  # ~1 line width on a 0.6 nozzle
 
-    # Wall thickness in mm ≈ t · L / π. Values below keep all walls ≥ 0.6 mm.
-    # Cells are slightly larger than CLAUDE.md's defaults to make the lattice
-    # visually less cramped at this scale (100×90 mm part shouldn't show 30
-    # cells across).
+    # Wall thickness in mm = t · L / π. All variants below keep walls ≥ 1.20 mm
+    # — anything thinner fragments the gyroid into thousands of disconnected
+    # polygons per layer that the slicer can't handle (see
+    # docs/2026-05-03-slicer-fragmentation-analysis.md).
     variants = [
-        # label,         h,   L_bot, L_top, t_bot, t_top, x_pos,        y_pos
-        ("h3_dense",   3.0,   5.0,   8.0,   0.50,  0.35, -pitch_x / 2, -pitch_y / 2),
-        ("h3_sparse",  3.0,   7.0,  11.0,   0.35,  0.22, +pitch_x / 2, -pitch_y / 2),
-        ("h5_dense",   5.0,   5.0,   8.0,   0.50,  0.35, -pitch_x / 2, +pitch_y / 2),
-        ("h5_sparse",  5.0,   7.0,  11.0,   0.35,  0.22, +pitch_x / 2, +pitch_y / 2),
+        # label,         h,  L_bot, L_top, t_bot, t_top, x_pos,        y_pos          walls(b/t)        fill(b/t)
+        ("h3_dense",   3.0,  6.0,   9.0,   0.65,  0.45, -pitch_x / 2, -pitch_y / 2),  # 1.24 / 1.29 mm  65% / 45%
+        ("h3_sparse",  3.0,  8.0,  12.0,   0.50,  0.32, +pitch_x / 2, -pitch_y / 2),  # 1.27 / 1.22 mm  50% / 32%
+        ("h5_dense",   5.0,  6.0,   9.0,   0.65,  0.45, -pitch_x / 2, +pitch_y / 2),  # 1.24 / 1.29 mm  65% / 45%
+        ("h5_sparse",  5.0,  8.0,  12.0,   0.50,  0.32, +pitch_x / 2, +pitch_y / 2),  # 1.27 / 1.22 mm  50% / 32%
     ]
 
     meshes = []
