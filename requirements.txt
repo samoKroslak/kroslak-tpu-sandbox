@@ -1,0 +1,12 @@
+# Krošlák TPU comfort generator dependencies
+# Tested with Python 3.11+ on Windows. All pure-Python wheels available on PyPI.
+
+numpy>=1.24
+scikit-image>=0.22
+trimesh>=4.0
+fast-simplification>=0.1.7  # required by trimesh.simplify_quadric_decimation
+lxml>=5.0  # required by trimesh for 3MF export
+
+# Optional but useful for ad-hoc previews / debugging:
+# pyglet>=2.0     # for trimesh.show() interactive viewer
+# matplotlib>=3.8 # for inline mesh plotting in notebooks
