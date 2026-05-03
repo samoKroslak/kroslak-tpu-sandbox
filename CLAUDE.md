@@ -31,8 +31,9 @@ Build, maintain, and iterate on a Python generator that produces graded sheet-gy
 
 ### Drying
 - Sunlu S2 with fan, on top of P2S in Henryk mount
-- Pre-dry every TPU spool 8h @ 50°C before first use
-- Run dryer @ 45°C continuously during print
+- **Pre-dry every TPU 85A spool 8 h @ 70 °C** before first use (per Bambu official Technical Data Sheet — earlier 50 °C was wrong, too cool to drive moisture out at the rate TPU 85A absorbs it: saturated water absorption 0.67% at 25 °C/55% RH)
+- Run dryer @ 45–50 °C continuously during print
+- Density per spec: 1.18 g/cm³ (use this for mass estimates, not 1.21)
 
 ### Filaments
 | Material | Hardness | State | Notes |

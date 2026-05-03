@@ -324,6 +324,10 @@ def parse_cli() -> tuple[ArmrestParams, argparse.Namespace]:
     ap.add_argument("--thin-matrix", action="store_true",
                     help="Generate a 2×2 plate at 3 mm and 5 mm with a "
                          "solid-skin surface test on the right third of each part")
+    ap.add_argument("--tpu85a-two-buns", action="store_true",
+                    help="Generate two 5 mm buns (harder + softer) side-by-side "
+                         "as a Bambu-extended 3MF with TPU 85A + P2S + 0.6 mm "
+                         "settings baked in. Open in Bambu Studio, verify, slice.")
 
     args = ap.parse_args()
     params = ArmrestParams(
@@ -442,10 +446,298 @@ def thin_skin_matrix_plate(base: ArmrestParams) -> None:
     export_and_report(meshes, base, label="thin_2x2_h3-h5_dense-sparse_skin")
 
 
+# =============================================================================
+# Bambu-extended 3MF — bake slicer settings into the file so it opens
+# pre-configured. Schema based on OrcaSlicer/BambuStudio source.
+# =============================================================================
+
+# TPU 85A on Bambu Lab P2S with 0.6 mm hardened steel nozzle.
+# Numeric values per the official Bambu Filament TPU 85A Technical Data Sheet V1.0.
+BAMBU_TPU85A_P2S_SETTINGS = {
+    # ----- Printer -----
+    "printer_settings_id": ["Bambu Lab P2S 0.6 nozzle"],
+    "printer_model": ["Bambu Lab P2S"],
+    "nozzle_diameter": ["0.6"],
+    "printable_area": ["0x0", "256x0", "256x256", "0x256"],
+
+    # ----- Process -----
+    "print_settings_id": ["0.32mm Standard @BBL P2S 0.6 nozzle"],
+    "layer_height": "0.32",
+    "initial_layer_print_height": "0.36",
+    "line_width": "0.63",
+    "initial_layer_line_width": "0.7",
+    "outer_wall_line_width": "0.6",
+    "inner_wall_line_width": "0.65",
+
+    # Speeds — slow for TPU. Outer wall slowest for surface quality.
+    "outer_wall_speed": "20",
+    "inner_wall_speed": "30",
+    "initial_layer_speed": "15",
+    "travel_speed": "80",
+    "internal_solid_infill_speed": "30",
+    "sparse_infill_speed": "30",
+    "top_surface_speed": "20",
+
+    # Walls / shells — gyroid is the structure.
+    "wall_loops": "2",
+    "top_shell_layers": "0",
+    "bottom_shell_layers": "3",
+    "sparse_infill_density": "0%",
+    "detect_thin_wall": "0",
+
+    # Adhesion
+    "brim_type": "outer_only",
+    "brim_width": "5",
+    "brim_object_gap": "0",
+
+    # ----- Filament — Bambu TPU 85A per official spec sheet -----
+    "filament_settings_id": ["Bambu TPU 85A"],
+    "filament_type": ["TPU"],
+    "filament_vendor": ["Bambu Lab"],
+    "filament_density": ["1.18"],
+    "filament_max_volumetric_speed": ["5"],
+
+    "nozzle_temperature": ["225"],
+    "nozzle_temperature_initial_layer": ["240"],
+    "hot_plate_temp": ["32"],
+    "hot_plate_temp_initial_layer": ["32"],
+    "textured_plate_temp": ["32"],
+    "textured_plate_temp_initial_layer": ["32"],
+
+    # Cooling — keep the fan moderate; TPU 85A spec says "turn on", 50% gives
+    # crisp geometry without stiffening the surface.
+    "fan_min_speed": ["50"],
+    "fan_max_speed": ["50"],
+    "close_fan_the_first_x_layers": ["3"],
+    "slow_down_for_layer_cooling": ["0"],
+
+    # Retraction — soft TPU skips the gear at high retract speed/length.
+    "retraction_length": ["0.8"],
+    "retraction_speed": ["25"],
+    "retract_when_changing_layer": ["1"],
+    "z_hop": ["0.4"],
+    "z_hop_types": ["Above Z"],
+
+    # Flow Dynamics Calibration / pressure advance — Bambu's preset is
+    # pre-tuned for TPU; calibration here breaks it.
+    "enable_pressure_advance": ["0"],
+    "pressure_advance": ["0"],
+}
+
+
+def _bambu_3mf_content_types() -> str:
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>
+</Types>
+"""
+
+
+def _bambu_3mf_rels() -> str:
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>
+</Relationships>
+"""
+
+
+def _bambu_3mf_plate_config() -> str:
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <plate>
+        <metadata key="plater_id" value="1"/>
+        <metadata key="plater_name" value=""/>
+        <metadata key="locked" value="false"/>
+        <metadata key="filament_map_mode" value="Auto For Flush"/>
+    </plate>
+</config>
+"""
+
+
+def _bambu_3mf_model_settings(object_ids: list[int]) -> str:
+    """Per-object overrides applied to every object on the plate."""
+    overrides = (
+        '        <metadata key="extruder" value="1"/>\n'
+        '        <metadata key="sparse_infill_density" value="0"/>\n'
+        '        <metadata key="top_shell_layers" value="0"/>\n'
+        '        <metadata key="bottom_shell_layers" value="3"/>\n'
+        '        <metadata key="wall_loops" value="2"/>\n'
+        '        <metadata key="detect_thin_wall" value="0"/>\n'
+        '        <metadata key="enable_support" value="false"/>\n'
+        '        <metadata key="brim_type" value="outer_only"/>\n'
+        '        <metadata key="brim_width" value="5"/>\n'
+    )
+    objects_xml = "".join(
+        f'    <object id="{oid}">\n{overrides}    </object>\n'
+        for oid in object_ids
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<config>\n'
+        f'{objects_xml}'
+        '</config>\n'
+    )
+
+
+def export_bambu_3mf(meshes_with_names: list[tuple[str, "trimesh.Trimesh"]],
+                    output_path: Path,
+                    settings: dict,
+                    plate_size: float = 256.0) -> None:
+    """Write a Bambu-Studio-ready 3MF with each mesh as its own object plus
+    process+filament+printer settings baked in. Opening the file in Bambu
+    Studio resolves printer/filament profile, applies the per-object overrides,
+    and is ready to slice without further configuration.
+    """
+    import json
+    import zipfile
+    from xml.sax.saxutils import escape
+
+    # Lay objects out side-by-side on the plate with 12 mm spacing
+    placed = []
+    cursor_x = 0.0
+    spacing = 12.0
+    for name, mesh in meshes_with_names:
+        m = mesh.copy()
+        b = m.bounds
+        m.apply_translation([cursor_x - b[0, 0], -b[0, 1], -b[0, 2]])
+        cursor_x += (b[1, 0] - b[0, 0]) + spacing
+        placed.append((name, m))
+
+    total_width = cursor_x - spacing
+    cx = (plate_size - total_width) / 2.0
+    cy = plate_size / 2.0
+    for _, m in placed:
+        b = m.bounds
+        m.apply_translation([cx, cy - (b[0, 1] + b[1, 1]) / 2.0, 0.0])
+
+    # Build 3D/3dmodel.model XML — each mesh as a separate <object> so the
+    # slicer can apply per-object metadata from model_settings.config.
+    xml_parts = ['<?xml version="1.0" encoding="UTF-8"?>\n']
+    xml_parts.append(
+        '<model unit="millimeter" '
+        'xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" '
+        'xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">\n'
+    )
+    xml_parts.append("<resources>\n")
+    object_ids = []
+    for i, (name, m) in enumerate(placed, start=1):
+        xml_parts.append(
+            f'<object id="{i}" type="model" name="{escape(name)}"><mesh>'
+        )
+        xml_parts.append("<vertices>")
+        for v in m.vertices:
+            xml_parts.append(
+                f'<vertex x="{v[0]:.4f}" y="{v[1]:.4f}" z="{v[2]:.4f}"/>'
+            )
+        xml_parts.append("</vertices><triangles>")
+        for f in m.faces:
+            xml_parts.append(
+                f'<triangle v1="{int(f[0])}" v2="{int(f[1])}" v3="{int(f[2])}"/>'
+            )
+        xml_parts.append("</triangles></mesh></object>\n")
+        object_ids.append(i)
+    xml_parts.append("</resources>\n<build>\n")
+    for oid in object_ids:
+        xml_parts.append(
+            f'<item objectid="{oid}" '
+            f'transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n'
+        )
+    xml_parts.append("</build>\n</model>\n")
+    model_xml = "".join(xml_parts)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(output_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("[Content_Types].xml", _bambu_3mf_content_types())
+        z.writestr("_rels/.rels", _bambu_3mf_rels())
+        z.writestr("3D/3dmodel.model", model_xml)
+        z.writestr("Metadata/model_settings.config",
+                   _bambu_3mf_model_settings(object_ids))
+        z.writestr("Metadata/plate_1.config", _bambu_3mf_plate_config())
+        z.writestr("Metadata/project_settings.config",
+                   json.dumps(settings, indent=2))
+
+
+def two_bun_tpu85a_plate(base: ArmrestParams) -> None:
+    """Two 100×90×5 mm buns side-by-side: one harder, one softer.
+    Both have the firm-bottom → soft-top gradient; the difference is overall
+    material density and surface compliance.
+
+    Exports a Bambu-extended 3MF with TPU 85A + P2S + 0.6 mm settings baked
+    in: opening the file in Bambu Studio loads the printer/filament/process
+    profile and per-object overrides automatically.
+    """
+    # Both buns: 5 mm tall, 100 × 90 mm footprint, gradient_power 1.5
+    # Walls = t · L / π. All walls ≥ 1.20 mm to keep the slicer happy.
+    HARDER = ArmrestParams(
+        width=base.width, depth=base.depth, height=5.0,
+        corner_radius=base.corner_radius, base_thickness=base.base_thickness,
+        L_bottom=6.0, L_top=10.0,
+        t_bottom=0.75, t_top=0.55,
+        gradient_power=1.5,
+        voxel=0.5, target_faces=50_000,
+        density_g_cm3=base.density_g_cm3,
+    )
+    SOFTER = ArmrestParams(
+        width=base.width, depth=base.depth, height=5.0,
+        corner_radius=base.corner_radius, base_thickness=base.base_thickness,
+        L_bottom=8.0, L_top=12.0,
+        t_bottom=0.55, t_top=0.32,
+        gradient_power=1.5,
+        voxel=0.5, target_faces=50_000,
+        density_g_cm3=base.density_g_cm3,
+    )
+
+    print(f"  HARDER bun: L=6/10 mm  t=0.75/0.55  walls=1.43/1.75 mm  fill 75%/55%")
+    print(f"  SOFTER bun: L=8/12 mm  t=0.55/0.32  walls=1.40/1.22 mm  fill 55%/32%")
+
+    mesh_harder = build_part(HARDER)
+    mesh_softer = build_part(SOFTER)
+
+    out_path = base.out_dir / "tpu85a_two_buns_thursday.3mf"
+    base.out_dir.mkdir(parents=True, exist_ok=True)
+    export_bambu_3mf(
+        [("bun_harder", mesh_harder), ("bun_softer", mesh_softer)],
+        out_path,
+        BAMBU_TPU85A_P2S_SETTINGS,
+    )
+
+    # Also export STL fallback (combined) for last-resort compatibility
+    combined = trimesh.util.concatenate([mesh_harder, mesh_softer])
+    combined.export(out_path.with_suffix(".stl"))
+
+    bounds = combined.bounds
+    dims = bounds[1] - bounds[0]
+    vol_cm3 = combined.volume / 1000.0
+    mass_g = vol_cm3 * base.density_g_cm3
+    from collections import Counter
+    edges = combined.edges_sorted
+    nm = sum(1 for c in Counter(map(tuple, edges)).values() if c > 2)
+
+    print()
+    print(f"=== tpu85a_two_buns_thursday ===")
+    print(f"  Bounds:        {dims[0]:.0f} × {dims[1]:.0f} × {dims[2]:.1f} mm")
+    print(f"  Solid volume:  {vol_cm3:.1f} cm³")
+    print(f"  Estimated mass:{mass_g:6.0f} g  (TPU 85A @ {base.density_g_cm3} g/cm³)")
+    print(f"  Faces:         {len(combined.faces):,}")
+    print(f"  Non-manifold:  {nm} edges")
+    print(f"  3MF (Bambu):   {out_path}")
+    print(f"  STL fallback:  {out_path.with_suffix('.stl')}")
+    print(f"\n  Bambu-extended 3MF embeds:")
+    print(f"  - Printer profile: Bambu Lab P2S, 0.6 mm hardened steel nozzle")
+    print(f"  - Filament profile: Bambu TPU 85A (225 °C, 32 °C bed, density 1.18)")
+    print(f"  - Process profile: 0.32 mm Standard, wall_loops=2, infill=0%")
+    print(f"  - Per-object overrides: top_shell=0, bottom_shell=3, brim 5 mm")
+    print()
+
+
 def main() -> int:
     params, args = parse_cli()
 
-    if args.thin_matrix:
+    if args.tpu85a_two_buns:
+        print("\nGenerating two-bun TPU 85A plate (harder + softer, gradient firm→soft)...")
+        two_bun_tpu85a_plate(params)
+    elif args.thin_matrix:
         print("\nGenerating thin 2×2 plate (3 + 5 mm) with right-third skin surface test...")
         thin_skin_matrix_plate(params)
     elif args.matrix:
@@ -458,8 +750,10 @@ def main() -> int:
         export_and_report([mesh], params)
 
     print("Done.\n"
-          "Next step: drop the .3mf into Bambu Studio, right-click → Repair model,\n"
-          "apply the slicer profile from slicer-profiles.md, and slice.\n")
+          "Next step: drop the .3mf into Bambu Studio. Bambu-extended 3MFs (e.g.\n"
+          "tpu85a_two_buns_thursday.3mf) auto-apply printer + filament + process\n"
+          "settings on open — verify and slice. Generic 3MFs need manual profile\n"
+          "selection per slicer-profiles.md.\n")
     return 0
 
 
